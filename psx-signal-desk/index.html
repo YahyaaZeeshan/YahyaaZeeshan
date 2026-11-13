@@ -354,6 +354,7 @@ async function boot(){
   const [db,mcp,sample,user]=await Promise.all([use('db'),use('mcp'),use('sample'),use('user')]);
   S.cap={db,mcp,sample,user};
   if(user){ try{ S.uid=await user.id(); }catch(e){} }
+  diag('boot');
   for(const [sym,name,sector] of UNIVERSE) S.stocks[sym]={sym,name,sector};
   await loadWatch(); await loadCache();
   for(const c of S.custom) if(!S.stocks[c]) S.stocks[c]={sym:c,name:c,sector:'Other',custom:true};
@@ -374,6 +375,7 @@ async function loadCache(){
   }catch(e){ console.warn('cache load', e); }
 }
 async function saveDoc(path, data){ const db=S.cap.db; if(!db) return; try{ await db.doc(path).set(data); }catch(e){ console.warn('save '+path, e && e.code); } }
+function diag(step, extra){ saveDoc('diag/last', Object.assign({at:Date.now(), step, caps:{db:!!S.cap.db, mcp:!!S.cap.mcp, sample:!!S.cap.sample, user:!!S.cap.user, uid:!!S.uid}}, extra||{})); }
 async function loadWatch(){
   let v=null;
   if(S.cap.db && S.uid){ try{ const d=await S.cap.db.doc('data/users/'+S.uid+'/watchlist').get(); if(d.exists) v=d.data(); }catch(e){} }
@@ -474,18 +476,19 @@ async function refresh(force){
           docSyms[k===BENCH?'KSE100':k]={d:got[k].t.map(x=>Math.round(x/86400)), c:got[k].c}; }
         S.pxAt=Date.now(); saveDoc('cache/px'+idx, {at:S.pxAt, syms:docSyms});
         done++; setStatus('Fetching prices, '+done+' of '+(chunks.length+1)+' batches…'); scoreAll(); render(); };
-      await handle(first, 0);               // first call alone: it may ask for connector consent
+      await handle(first, 0); diag('first prices ok', {bench:!!S.bench});               // first call alone: it may ask for connector consent
       let idx=1; await pool(chunks.map(c=>[c, idx++]), 2, ([c,i])=>handle(c,i));
     }
     const todo=syms.filter(s=>S.stocks[s].px && (force || !S.stocks[s].fund || Date.now()-S.stocks[s].fund.at>FUND_TTL));
     let n=0, fails=0;
     await pool(todo, 3, async(sym)=>{
       try{ const f=await fetchFund(sym); S.stocks[sym].fund={at:Date.now(), f}; saveDoc('fund/'+sym, {at:Date.now(), f:JSON.stringify(f)}); }
-      catch(e){ if(e && FATAL.has(e.code)) throw e; fails++; }
+      catch(e){ if(e && FATAL.has(e.code)) throw e; fails++; S.lastFail=String((e && (e.code||e.message))||''); }
       n++; setStatus('Fetching company accounts, '+n+' of '+todo.length+'…'); if(n%4===0 || n===todo.length){ scoreAll(); render(); } });
+    diag('refresh ok', {px:syms.filter(s=>S.stocks[s].px).length, fund:syms.filter(s=>S.stocks[s].fund).length, fails, lastFail:S.lastFail||'', bench:!!S.bench});
     scoreAll(); render(); setStatus(statusText()+(fails? ' '+fails+(fails===1?' company':' companies')+' returned no accounts.' : ''));
   }catch(e){
-    const code=e && e.code; showErr(MCP_MSG[code] || ('Could not refresh: '+((e && e.message)||'the data source did not answer')+'. Saved data is still shown. Try Refresh data again in a minute.'));
+    const code=e && e.code; diag('refresh error', {code:String(code||''), msg:String((e && e.message)||'').slice(0,300)}); showErr(MCP_MSG[code] || ('Could not refresh: '+((e && e.message)||'the data source did not answer')+'. Saved data is still shown. Try Refresh data again in a minute.'));
     setStatus(S.pxAt ? statusText() : 'No data loaded yet.');
   }finally{ S.busy=false; $('refreshBtn').disabled=false; scoreAll(); render(); }
 }
